@@ -1,55 +1,19 @@
-import streamlit as st
-import tempfile
-import numpy as np
-from PIL import Image
+import io
 import cv2
 import numpy as np
-import io
+from PIL import Image
+
+import tempfile
+import streamlit as st
 
 import what.utils.logger as log
 from what.models.detection.datasets.coco import COCO_CLASS_NAMES
 from what.models.detection.utils.box_utils import draw_bounding_boxes
-from what.models.detection.yolo.yolov3 import YOLOV3
 from what.models.detection.yolo.utils.yolo_utils import yolo_process_output, yolov3_anchors
 
 from what.attacks.detection.yolo.CBP import CBPAttack
 
 logger = log.get_logger(__name__)
-
-def bilinear_resize_vectorized(image, height, width):
-  """
-  `image` is a 2-D numpy array
-  `height` and `width` are the desired spatial dimension of the new 2-D array.
-  """
-  img_height, img_width = image.shape
-
-  image = image.ravel()
-
-  x_ratio = float(img_width - 1) / (width - 1) if width > 1 else 0
-  y_ratio = float(img_height - 1) / (height - 1) if height > 1 else 0
-
-  y, x = np.divmod(np.arange(height * width), width)
-
-  x_l = np.floor(x_ratio * x).astype('int32')
-  y_l = np.floor(y_ratio * y).astype('int32')
-
-  x_h = np.ceil(x_ratio * x).astype('int32')
-  y_h = np.ceil(y_ratio * y).astype('int32')
-
-  x_weight = (x_ratio * x) - x_l
-  y_weight = (y_ratio * y) - y_l
-
-  a = image[y_l * img_width + x_l]
-  b = image[y_l * img_width + x_h]
-  c = image[y_h * img_width + x_l]
-  d = image[y_h * img_width + x_h]
-
-  resized = a * (1 - x_weight) * (1 - y_weight) + \
-            b * x_weight * (1 - y_weight) + \
-            c * y_weight * (1 - x_weight) + \
-            d * x_weight * y_weight
-
-  return resized.reshape(height, width)
 
 # Initialize the UI
 st.header("White-box Adversarial Toolbox (WHAT)")
@@ -57,93 +21,66 @@ st.header("White-box Adversarial Toolbox (WHAT)")
 logo = Image.open('what.png')
 st.sidebar.image(logo, use_column_width=True)
 
+x_train = []
+x_test = []
+
+classes = COCO_CLASS_NAMES
+colors = np.random.uniform(0, 255, size=(len(classes), 3))
+
 # Upload the Image
 f = st.sidebar.file_uploader("Please Select the image/video to be attacked", type=['jpg', 'png', 'jpeg', 'mp4'])
 
 if f is not None:
+    # Initialize the dataset
     tfile = tempfile.NamedTemporaryFile(delete=True)
     tfile.write(f.read())
     img = np.array(Image.open(tfile).convert('RGB'))
 
-    # Read class names
-    with open("coco_classes.txt") as fc:
-        content = fc.readlines()
-    classes = [x.strip() for x in content] 
+    # For YOLO, the input pixel values are normalized to [0, 1]
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    input_cv_image = cv2.resize(img, (416, 416))
+    input_cv_image = np.array(input_cv_image).astype(np.float32) / 255.0
 
-    colors = np.random.uniform(0, 255, size=(len(classes), 3))
+    x_train.append(input_cv_image)
+
+    left_column, mid_column, right_column = st.columns(3)
+
+    # Progress Bar
+    my_bar = st.progress(0)
+
+    # Display the input image
+    input_img = (x_train[0] * 255.0).astype(np.uint8)
+    input_img = cv2.cvtColor(input_img, cv2.COLOR_RGB2BGR)
+    left_column.image(input_img, caption = "Input Image")
 
     attack = CBPAttack("yolov3.h5", "multi_untargeted", False, classes)
     attack.fixed = False
 
-    left_column, mid_column, right_column = st.columns(3)
-    left_column.image(img, caption = "Input Image")
+    # Display the prediction without attack
+    outs = attack.model.predict(np.array([input_cv_image]))
+    boxes, labels, probs = yolo_process_output(outs, yolov3_anchors, len(classes))
+    out_img = (input_cv_image * 255.0).astype(np.uint8)
+    out_img = cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
+    out_img = draw_bounding_boxes(out_img, boxes, labels, classes, probs);
+    mid_column.image(out_img, caption = "Output Image")
+
     with right_column:
         out_img_placeholder = st.empty()
-    origin_cv_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    print("Initiating Attack")
-    adv_placeholder = st.empty()
 
     for n in range(20):
-        # For YOLO, the input pixel values are normalized to [0, 1]
-        input_cv_image = cv2.resize(origin_cv_image, (416, 416))
+        # Update the progress bar
+        my_bar.progress((n + 1) * 5)
 
-        input_cv_image = np.array(input_cv_image).astype(np.float32) / 255.0
+        for x in x_train:
+            x, outs = attack.attack(x)
+            boxes, labels, probs = yolo_process_output(outs, yolov3_anchors, len(classes))
 
-        # Yolo inference
-        # outs = model.predict(np.array([input_cv_image]))
-        input_cv_image, outs = attack.attack(input_cv_image)
+            out_img = (x * 255.0).astype(np.uint8)
+            out_img = cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
+            out_img = draw_bounding_boxes(out_img, boxes, labels, classes, probs);
 
-        boxes, labels, probs = yolo_process_output(outs, yolov3_anchors, len(classes))
-
-        # (x, y, w, h) --> (x1, y1, x2, y2)
-        height, width, _ = origin_cv_image.shape
-        for box in boxes:
-            box[0] *= width
-            box[1] *= height
-            box[2] *= width 
-            box[3] *= height
-
-            # From center to top left
-            box[0] -= box[2] / 2
-            box[1] -= box[3] / 2
-
-            # From width and height to x2 and y2
-            box[2] += box[0]
-            box[3] += box[1]
-
-        # Draw bounding boxes
-        out_img = cv2.cvtColor(origin_cv_image, cv2.COLOR_RGB2BGR)
-        out_img = out_img.astype(np.float32) / 255.0
-        height, width, _ = out_img.shape
-        noise = attack.noise
-        noise_r = bilinear_resize_vectorized(noise[:, :, 0], height, width)
-        noise_g = bilinear_resize_vectorized(noise[:, :, 1], height, width)
-        noise_b = bilinear_resize_vectorized(noise[:, :, 2], height, width)
-        noise = np.dstack((noise_r, noise_g, noise_b))
-
-        out_img = out_img + noise
-        out_img = np.clip(out_img, 0, 1)
-
-        # input_cv_image = cv2.resize(input_cv_image, (width, height), interpolation = cv2.INTER_AREA)
-        out_img = (out_img * 255.0).astype(np.uint8)
-        out_img = draw_bounding_boxes(out_img, boxes, labels, classes, probs);
-
-        if n == 0:
-            mid_column.image(out_img, caption = "Output Image")
-
-        with right_column:
-            out_img_placeholder.image(out_img, caption = "Adversarial Image")
-
-        label_str = ""
-        label = f"[{n}] "
-        for i in range(len(probs)):
-            label += f"{classes[labels[i]]}: {probs[i]:.2f} "
-            if i == (len(probs) - 1):
-                label += f"\n"
-        label_str += label
-
-        print(label_str)
-        st.write(label_str)
+            with right_column:
+                out_img_placeholder.image(out_img, caption = "Adversarial Image")
 
     np.save('noise.npy', attack.noise)
 
