@@ -1,2 +1,5 @@
 *.npy
 *.h5
+*.mp4
+*.avi
+!demo_s.mp4
