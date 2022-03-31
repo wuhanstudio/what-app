@@ -138,7 +138,7 @@ if f is not None:
     n_iteration = 20
     for n in range(n_iteration):
         # Update the progress bar
-        my_bar.progress((n + 1) * 100 / n_iteration)
+        my_bar.progress(int((n + 1) * 100 / n_iteration))
 
         for x in x_train:
             x, outs = attack.attack(x)
