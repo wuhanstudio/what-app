@@ -32,6 +32,18 @@ x_test = []
 classes = COCO_CLASS_NAMES
 colors = np.random.uniform(0, 255, size=(len(classes), 3))
 
+inference_bar = None
+attack_bar = None
+verification_bar = None
+
+n_iteration = st.sidebar.slider(
+     'Select number of iterations',
+     0, 500, 50, 5)
+
+option = st.sidebar.selectbox(
+     'Attack Method',
+     ('CBP', 'TOG', 'Others'))
+
 # Upload the Image
 f = st.sidebar.file_uploader("Please Select the image/video to be attacked", type=['jpg', 'png', 'jpeg', 'mp4'])
 
@@ -40,8 +52,19 @@ if f is not None:
     with right_column:
         out_img_placeholder = st.empty()
 
-    # Progress Bar
-    my_bar = st.progress(0)
+    if f.name.endswith('.mp4'):
+        st.info('Video uploaded. Processing...')
+        st.write('Inference Progress')
+        inference_bar = st.progress(0)
+    else:
+        st.info('Image uploaded. Processing...')
+
+    st.write('Attack Progress')
+    attack_bar = st.progress(0)
+
+    if f.name.endswith('.mp4'):
+        st.write('Final Output')
+        verification_bar = st.progress(0)
 
     width, height = 0, 0 
 
@@ -95,7 +118,7 @@ if f is not None:
         for i in range(len(x_input)):
             # Display the prediction without attack
             x = x_input[i]
-            my_bar.progress(int((i+1) * 100 / len(x_input)))
+            inference_bar.progress(int((i+1) * 100 / len(x_input)))
             outs = attack.model.predict(np.array([x]))
             boxes, labels, probs = yolo_process_output(outs, yolov3_anchors, len(classes))
             out_img = (x * 255.0).astype(np.uint8)
@@ -135,10 +158,12 @@ if f is not None:
         x_train = x_input
         x_test = x_input
 
-    n_iteration = 20
-    for n in range(n_iteration):
+    # Initiate the attack
+    print("Starting attack,", n_iteration, "iterations")
+
+    for n in range(int(n_iteration)):
         # Update the progress bar
-        my_bar.progress(int((n + 1) * 100 / n_iteration))
+        attack_bar.progress(int((n + 1) * 100 / n_iteration))
 
         for x in x_train:
             x, outs = attack.attack(x)
@@ -152,15 +177,18 @@ if f is not None:
                 with right_column:
                     out_img_placeholder.image(out_img, caption = "Adversarial Image")
     
+    st.success('Attack Completed')
+
     # Write the video under attack
     if(len(x_train) > 1):
         fourcc = cv2.VideoWriter_fourcc(*'XVID')
         out = cv2.VideoWriter('temp_attack.avi', fourcc, 20.0, (width, height))
         print("Writing to avi", width, height)
     
+        # Final verification
         for i in range(len(x_input)):
             # Display the prediction without attack
-            my_bar.progress(int((i+1) * 100 / len(x_input)))
+            verification_bar.progress(int((i+1) * 100 / len(x_input)))
             x = x_input[i]
             x = x + attack.noise
             x = np.clip(x, 0.0, 1.0)
